@@ -135,7 +135,8 @@
     clippy::redundant_pub_crate,
     clippy::return_self_not_must_use,
     clippy::similar_names,
-    clippy::should_implement_trait
+    clippy::should_implement_trait,
+    clippy::too_many_lines
 )]
 
 // Define submodules and re-exports

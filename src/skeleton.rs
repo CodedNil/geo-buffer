@@ -6,27 +6,27 @@ use geo::{Contains, Winding};
 use geo_types::{LineString, MultiPolygon, Polygon};
 
 use crate::priority_queue::PriorityQueue;
-use crate::util::*;
-use crate::vertex_queue::*;
+use crate::util::{feq, fgeq, fleq, fneq, Coordinate, Ray};
+use crate::vertex_queue::{IndexType, VertexQueue};
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum VertexType {
-    TreeVertex {
+    Tree {
         axis: Ray,
         left_ray: Ray,
         right_ray: Ray,
         parent: usize,
         time_elapsed: f64,
     },
-    SplitVertex {
+    Split {
         anchor: usize,
         location: Coordinate,
         split_left: usize,
         split_right: usize,
         time_elapsed: f64,
     },
-    RootVertex {
+    Root {
         location: Coordinate,
         time_elapsed: f64,
     },
@@ -38,7 +38,7 @@ impl VertexType {
         let r2 = Ray::new(cv, rv);
         let mut r3 = r1.bisector(&r2, cv, orient);
         r3.angle = r3.angle / (r3.point_by_ratio(1.).dist_ray(&r2));
-        Self::TreeVertex {
+        Self::Tree {
             axis: r3,
             left_ray: r1,
             right_ray: r2,
@@ -55,7 +55,7 @@ impl VertexType {
                     - axis.point_by_ratio(0.).dist_ray(&left_ray),
             );
         let time_elapsed = axis.origin.dist_ray(&left_ray);
-        Self::TreeVertex {
+        Self::Tree {
             axis,
             left_ray,
             right_ray,
@@ -71,7 +71,7 @@ impl VertexType {
         split_right: usize,
         time_elapsed: f64,
     ) -> Self {
-        Self::SplitVertex {
+        Self::Split {
             anchor,
             location,
             split_left,
@@ -81,7 +81,7 @@ impl VertexType {
     }
 
     const fn new_root_vertex(location: Coordinate, time_elapsed: f64) -> Self {
-        Self::RootVertex {
+        Self::Root {
             location,
             time_elapsed,
         }
@@ -130,43 +130,43 @@ impl VertexType {
 
     const fn unwrap_location(&self) -> Coordinate {
         match self {
-            Self::TreeVertex { axis, .. } => axis.origin,
-            Self::SplitVertex { location, .. } | Self::RootVertex { location, .. } => *location,
+            Self::Tree { axis, .. } => axis.origin,
+            Self::Split { location, .. } | Self::Root { location, .. } => *location,
         }
     }
 
     const fn unwrap_time(&self) -> f64 {
         match self {
-            VertexType::TreeVertex { time_elapsed, .. } => *time_elapsed,
-            VertexType::SplitVertex { time_elapsed, .. } => *time_elapsed,
-            VertexType::RootVertex { time_elapsed, .. } => *time_elapsed,
+            Self::Tree { time_elapsed, .. }
+            | Self::Split { time_elapsed, .. }
+            | Self::Root { time_elapsed, .. } => *time_elapsed,
         }
     }
 
     fn unwrap_ray(&self) -> Ray {
-        if let VertexType::TreeVertex { axis, .. } = self {
-            return axis.clone();
+        if let Self::Tree { axis, .. } = self {
+            return *axis;
         }
         panic!("Expected VertexType::TreeVertex");
     }
 
     fn unwrap_base_ray(&self) -> (Ray, Ray) {
-        if let VertexType::TreeVertex {
+        if let Self::Tree {
             left_ray,
             right_ray,
             ..
         } = self
         {
-            return (left_ray.clone(), right_ray.clone());
+            return (*left_ray, *right_ray);
         }
-        panic!("Expected VertexType::TreeVertex but {:?}", self);
+        panic!("Expected VertexType::TreeVertex but {self:?}");
     }
 
     fn set_parent(&mut self, nparent: usize) {
-        if let VertexType::TreeVertex { parent, .. } = self {
+        if let Self::Tree { parent, .. } = self {
             *parent = nparent;
         } else {
-            panic!("Expected VertexType::TreeVertex but {:?}", self)
+            panic!("Expected VertexType::TreeVertex but {self:?}")
         };
     }
 }
@@ -190,12 +190,12 @@ enum Event {
 impl PartialOrd for Event {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let x1 = match self {
-            Event::VertexEvent {
+            Self::VertexEvent {
                 time,
                 merge_from,
                 merge_to,
             } => (*time, *merge_from, *merge_to, 0, 0),
-            Event::EdgeEvent {
+            Self::EdgeEvent {
                 time,
                 split_from,
                 split_into,
@@ -210,12 +210,12 @@ impl PartialOrd for Event {
             ),
         };
         let x2 = match other {
-            Event::VertexEvent {
+            Self::VertexEvent {
                 time,
                 merge_from,
                 merge_to,
             } => (*time, *merge_from, *merge_to, 0, 0),
-            Event::EdgeEvent {
+            Self::EdgeEvent {
                 time,
                 split_from,
                 split_into,
@@ -236,8 +236,7 @@ impl PartialOrd for Event {
 impl Event {
     const fn unwrap_time(&self) -> f64 {
         match self {
-            Event::VertexEvent { time, .. } => *time,
-            Event::EdgeEvent { time, .. } => *time,
+            Self::VertexEvent { time, .. } | Self::EdgeEvent { time, .. } => *time,
         }
     }
 }
@@ -264,12 +263,12 @@ enum Timeline {
 impl fmt::Display for Timeline {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Timeline::ShrinkEvent {
+            Self::ShrinkEvent {
                 left_real,
                 right_real,
                 ..
             } => write!(f, "Shrink {} and {}", *left_real, *right_real),
-            Timeline::SplitEvent { anchor_real, .. } => write!(f, "Split {}", *anchor_real),
+            Self::SplitEvent { anchor_real, .. } => write!(f, "Split {}", *anchor_real),
         }
     }
 }
@@ -277,39 +276,37 @@ impl fmt::Display for Timeline {
 impl PartialOrd for Timeline {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let t1 = match self {
-            Timeline::ShrinkEvent { time, .. } => *time,
-            Timeline::SplitEvent { time, .. } => *time,
+            Self::ShrinkEvent { time, .. } | Self::SplitEvent { time, .. } => *time,
         };
         let t2 = match other {
-            Timeline::ShrinkEvent { time, .. } => *time,
-            Timeline::SplitEvent { time, .. } => *time,
+            Self::ShrinkEvent { time, .. } | Self::SplitEvent { time, .. } => *time,
         };
         if fneq(t1, t2) {
             return Some(t1.partial_cmp(&t2).unwrap());
         }
         let x1 = match self {
-            Timeline::ShrinkEvent {
+            Self::ShrinkEvent {
                 location,
                 left_real,
                 right_real,
                 tie_break,
                 ..
             } => (1, tie_break, location, left_real, right_real),
-            Timeline::SplitEvent {
+            Self::SplitEvent {
                 location,
                 anchor_real,
                 ..
             } => (0, &0., location, anchor_real, anchor_real),
         };
         let x2 = match other {
-            Timeline::ShrinkEvent {
+            Self::ShrinkEvent {
                 location,
                 left_real,
                 right_real,
                 tie_break,
                 ..
             } => (1, tie_break, location, left_real, right_real),
-            Timeline::SplitEvent {
+            Self::SplitEvent {
                 location,
                 anchor_real,
                 ..
@@ -403,27 +400,29 @@ impl Skeleton {
                 let crd = cray.point_by_ratio(time_left);
                 crdv.push(crd);
             } else {
-                let mut left_normal;
-                let mut right_normal;
-                if orient {
-                    left_normal = Ray {
-                        origin: cray.origin,
-                        angle: (-lray.angle.1, lray.angle.0).into(),
-                    };
-                    right_normal = Ray {
-                        origin: cray.origin,
-                        angle: (rray.angle.1, -rray.angle.0).into(),
-                    };
+                let (mut left_normal, mut right_normal) = if orient {
+                    (
+                        Ray {
+                            origin: cray.origin,
+                            angle: (-lray.angle.1, lray.angle.0).into(),
+                        },
+                        Ray {
+                            origin: cray.origin,
+                            angle: (rray.angle.1, -rray.angle.0).into(),
+                        },
+                    )
                 } else {
-                    left_normal = Ray {
-                        origin: cray.origin,
-                        angle: (lray.angle.1, -lray.angle.0).into(),
-                    };
-                    right_normal = Ray {
-                        origin: cray.origin,
-                        angle: (-rray.angle.1, rray.angle.0).into(),
-                    };
-                }
+                    (
+                        Ray {
+                            origin: cray.origin,
+                            angle: (lray.angle.1, -lray.angle.0).into(),
+                        },
+                        Ray {
+                            origin: cray.origin,
+                            angle: (-rray.angle.1, rray.angle.0).into(),
+                        },
+                    )
+                };
                 left_normal.normalize();
                 right_normal.normalize();
                 loop {
@@ -486,7 +485,7 @@ impl Skeleton {
     fn find_split_vertex(
         cv: IndexType,
         vertex_queue: &VertexQueue,
-        vertex_vector: &Vec<VertexType>,
+        vertex_vector: &[VertexType],
         is_init: bool,
         orient: bool,
     ) -> Vec<(f64, Coordinate, IndexType, usize)> {
@@ -509,12 +508,12 @@ impl Skeleton {
             }
             let base_ray = vertex_vector[sv_real].unwrap_base_ray().1;
             let left_intersection = if left_ray.is_parallel(&base_ray) {
-                Default::default()
+                Coordinate::default()
             } else {
                 left_ray.intersect(&base_ray)
             };
             let right_intersection = if right_ray.is_parallel(&base_ray) {
-                Default::default()
+                Coordinate::default()
             } else {
                 right_ray.intersect(&base_ray)
             };
@@ -538,50 +537,48 @@ impl Skeleton {
                 if !orient && base_ray.orientation(&real_intersection) > 0 {
                     continue;
                 }
+            } else if orient {
+                if vertex_vector[sv_real]
+                    .unwrap_ray()
+                    .orientation(&real_intersection)
+                    >= 0
+                {
+                    continue;
+                }
+                if base_ray.orientation(&real_intersection) < 0 {
+                    continue;
+                }
+                if vertex_vector[srv_real]
+                    .unwrap_ray()
+                    .orientation(&real_intersection)
+                    < 0
+                {
+                    continue;
+                }
             } else {
-                if orient {
-                    if vertex_vector[sv_real]
-                        .unwrap_ray()
-                        .orientation(&real_intersection)
-                        >= 0
-                    {
-                        continue;
-                    }
-                    if base_ray.orientation(&real_intersection) < 0 {
-                        continue;
-                    }
-                    if vertex_vector[srv_real]
-                        .unwrap_ray()
-                        .orientation(&real_intersection)
-                        < 0
-                    {
-                        continue;
-                    }
-                } else {
-                    if vertex_vector[sv_real]
-                        .unwrap_ray()
-                        .orientation(&real_intersection)
-                        <= 0
-                    {
-                        continue;
-                    }
-                    if base_ray.orientation(&real_intersection) > 0 {
-                        continue;
-                    }
-                    if vertex_vector[srv_real]
-                        .unwrap_ray()
-                        .orientation(&real_intersection)
-                        > 0
-                    {
-                        continue;
-                    }
+                if vertex_vector[sv_real]
+                    .unwrap_ray()
+                    .orientation(&real_intersection)
+                    <= 0
+                {
+                    continue;
+                }
+                if base_ray.orientation(&real_intersection) > 0 {
+                    continue;
+                }
+                if vertex_vector[srv_real]
+                    .unwrap_ray()
+                    .orientation(&real_intersection)
+                    > 0
+                {
+                    continue;
                 }
             }
             let dist = real_intersection.dist_ray(&right_ray);
             ret.push((dist, real_intersection, sv, sv_real));
         }
         ret.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        if !is_init && ret.len() != 0 {
+        if !is_init && !ret.is_empty() {
             ret = vec![ret[0]];
         }
         ret
@@ -591,15 +588,15 @@ impl Skeleton {
         cv: IndexType,
         vertex_queue: &VertexQueue,
         event_pq: &mut PriorityQueue<Timeline>,
-        vertex_vector: &Vec<VertexType>,
+        vertex_vector: &[VertexType],
         orient: bool,
     ) {
         let resv = Self::find_split_vertex(cv, vertex_queue, vertex_vector, true, orient);
         let cv_real = vertex_queue.get_real_index(cv);
         for (time, location, _, _) in resv {
             event_pq.insert(Timeline::SplitEvent {
-                time: time,
-                location: location,
+                time,
+                location,
                 anchor_vertex: cv,
                 anchor_real: cv_real,
             });
@@ -610,7 +607,7 @@ impl Skeleton {
         cv: IndexType,
         vertex_queue: &VertexQueue,
         event_pq: &mut PriorityQueue<Timeline>,
-        vertex_vector: &Vec<VertexType>,
+        vertex_vector: &[VertexType],
         is_init: bool,
     ) {
         let mut lv = cv;
@@ -634,7 +631,7 @@ impl Skeleton {
                     right_vertex: rv,
                     left_real: lv_real,
                     right_real: rv_real,
-                    tie_break: tie_break,
+                    tie_break,
                 });
             }
             if is_init {
@@ -735,7 +732,7 @@ impl Skeleton {
                 vertex_vector[left_real].set_parent(new_index);
                 vertex_vector[right_real].set_parent(new_index);
                 let new_event = Event::VertexEvent {
-                    time: time,
+                    time,
                     merge_from: left_vertex.get_index(),
                     merge_to: new_index,
                 };
@@ -840,8 +837,8 @@ impl Skeleton {
         }
         Self {
             ray_vector: vertex_vector,
-            event_queue: event_queue,
-            initial_vertex_queue: initial_vertex_queue,
+            event_queue,
+            initial_vertex_queue,
         }
     }
 
@@ -856,33 +853,34 @@ impl Skeleton {
                 return;
             }
             visit[cur] = true;
-            match ray_vector[cur] {
-                VertexType::RootVertex { .. } => {
-                    return;
-                }
-                VertexType::TreeVertex { parent, .. } => {
-                    if parent == usize::MAX {
+
+            if let Some(vertex) = ray_vector.get(cur) {
+                match vertex {
+                    VertexType::Root { .. } => {}
+                    VertexType::Tree { parent, .. } => {
+                        if *parent == usize::MAX {
+                            let ls = LineString(vec![
+                                ray_vector[cur].unwrap_location().into(),
+                                ray_vector[cur].unwrap_ray().point_by_ratio(5.).into(),
+                            ]);
+                            ret.push(ls);
+                            return;
+                        }
                         let ls = LineString(vec![
                             ray_vector[cur].unwrap_location().into(),
-                            ray_vector[cur].unwrap_ray().point_by_ratio(5.).into(),
+                            ray_vector[*parent].unwrap_location().into(),
                         ]);
                         ret.push(ls);
-                        return;
+                        dfs_helper(*parent, visit, ret, ray_vector);
                     }
-                    let ls = LineString(vec![
-                        ray_vector[cur].unwrap_location().into(),
-                        ray_vector[parent].unwrap_location().into(),
-                    ]);
-                    ret.push(ls);
-                    dfs_helper(parent, visit, ret, ray_vector);
-                }
-                VertexType::SplitVertex {
-                    split_left,
-                    split_right,
-                    ..
-                } => {
-                    dfs_helper(split_left, visit, ret, ray_vector);
-                    dfs_helper(split_right, visit, ret, ray_vector);
+                    VertexType::Split {
+                        split_left,
+                        split_right,
+                        ..
+                    } => {
+                        dfs_helper(*split_left, visit, ret, ray_vector);
+                        dfs_helper(*split_right, visit, ret, ray_vector);
+                    }
                 }
             }
         }
